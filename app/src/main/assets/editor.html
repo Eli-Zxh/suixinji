@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<!--
+  随心记 逐行实时预览 Markdown 编辑器（Obsidian live-preview 逻辑）：
+  平时渲染显示，点击某行变回源码编辑，失焦恢复渲染。
+
+  图片渲染走「正常网站」方式（M2.6）：页面基址为 https://suixinji.local/，
+  img 标签的相对路径 src 由浏览器直接按 URL 请求，原生侧
+  WebViewClient.shouldInterceptRequest 充当源站服务器返回 picture/ 字节流——
+  原生解码带缓存，不经过 JS 桥（此前 JS 桥换 src 的方式真机上一直不可靠）。
+  注意：本注释里严禁出现成对的 HTML 注释标记——外层注释遇到第一个闭合标记
+  就结束，其后内容会被当成正文渲染（M2.6 真机踩坑：编辑器顶部渲染出这段说明）。
+
+  分块方式（M2.6）：逐行分块——每个非空行是独立可编辑块；
+  代码围栏（三个反引号/波浪线）整体一块；缩进续行并入上一块；独立 HTML 注释行
+  （part 编号 / 时间锚）并入其后内容块避免幽灵块；
+  sep 记录块间分隔符，保存时原样还原行距。
+
+  Markdown 渲染使用 marked v12.0.2 (MIT License, https://github.com/markedjs/marked)。
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<script src="marked.min.js"></script>
+<style>
+  :root {
+    --fg: #1d2733; --muted: #6b7a8c; --border: #e3e8ee; --accent: #2f6fed;
+    --edit-bg: #f6f9ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 12px 14px 120px;
+    font: 16px/1.7 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    color: var(--fg); background: #fff;
+    -webkit-text-size-adjust: 100%;
+  }
+  .block { min-height: 1em; padding: 2px 6px; border-radius: 6px; margin: 2px 0; }
+  .block:hover { background: #f4f7fb; }
+  .block img { max-width: 100%; height: auto; border-radius: 8px; }
+  h1, h2, h3, h4 { line-height: 1.4; margin: 0.6em 0 0.4em; }
+  h1 { font-size: 1.45em; } h2 { font-size: 1.25em; } h3 { font-size: 1.1em; }
+  blockquote { margin: 0.4em 0; padding: 2px 12px; color: var(--muted); border-left: 3px solid var(--border); }
+  code { background: #f0f3f7; padding: 1px 5px; border-radius: 4px; font-size: 0.9em; }
+  pre { background: #f0f3f7; padding: 10px; border-radius: 8px; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; }
+  td, th { border: 1px solid var(--border); padding: 4px 10px; }
+  .editing textarea {
+    width: 100%; border: 1.5px solid var(--accent); border-radius: 8px;
+    background: var(--edit-bg); padding: 8px; resize: none; overflow: hidden;
+    font: 14px/1.6 ui-monospace, Menlo, monospace; color: var(--fg);
+  }
+  .editing textarea:focus { outline: none; }
+  .hint { position: fixed; right: 12px; bottom: 10px; color: var(--muted);
+          font-size: 11px; opacity: .7; }
+</style>
+</head>
+<body>
+<div id="editor"></div>
+<div class="hint">点按任意一行可直接编辑</div>
+<script>
+(function () {
+  var container = document.getElementById('editor');
+  var blocks = [];          // [{text: 块源文本, sep: 与下一块的分隔符}]
+  var editingIndex = -1;
+
+  function isPureComment(line) {
+    var t = line.trim();
+    return t.indexOf('<!--') === 0 && t.replace(/<!--[\s\S]*?-->/g, '').trim() === '';
+  }
+  function fenceMark(line) {
+    var t = line.trim();
+    if (t.indexOf('```') === 0) return '```';
+    if (t.indexOf('~~~') === 0) return '~~~';
+    return null;
+  }
+
+  function splitBlocks(md) {
+    var lines = md.replace(/\r\n/g, '\n').split('\n');
+    var out = [];
+    var i = 0;
+    while (i < lines.length) {
+      if (lines[i].trim() === '') { i++; continue; }
+      var parts = [];
+      var brokeOnBlank = false;
+      // 前置独立注释行（时间锚/部分编号）并入本块
+      while (i < lines.length && lines[i].trim() !== '' && isPureComment(lines[i])) {
+        parts.push(lines[i]); i++;
+        if (i < lines.length && lines[i].trim() === '') { brokeOnBlank = true; break; }
+      }
+      if (!brokeOnBlank && i < lines.length && lines[i].trim() !== '') {
+        var fence = fenceMark(lines[i]);
+        parts.push(lines[i]); i++;
+        while (i < lines.length) {
+          var nx = lines[i];
+          if (fence) {                      // 围栏内整段吞入
+            parts.push(nx); i++;
+            if (fenceMark(nx)) fence = null;
+            continue;
+          }
+          if (nx.trim() === '' || fenceMark(nx)) break;
+          if (/^\s/.test(nx)) { parts.push(nx); i++; continue; }  // 缩进续行并入
+          break;                                                 // 普通行 → 独立块
+        }
+      }
+      var sep = i >= lines.length ? '' : (lines[i].trim() === '' ? '\n\n' : '\n');
+      out.push({ text: parts.join('\n'), sep: sep });
+    }
+    return out.length ? out : [{ text: '', sep: '' }];
+  }
+
+  function renderBlockHtml(md) {
+    try { return marked.parse(md, { breaks: true }); }
+    catch (e) { return '<pre>' + md.replace(/</g, '&lt;') + '</pre>'; }
+  }
+
+  function getMarkdown() {
+    var s = '';
+    for (var i = 0; i < blocks.length; i++) {
+      s += blocks[i].text;
+      if (i < blocks.length - 1) s += (blocks[i].sep || '\n');
+    }
+    return s;
+  }
+
+  function commitEdit(save) {
+    if (editingIndex < 0) return;
+    var ta = container.querySelector('textarea');
+    if (ta && save) {
+      var v = ta.value;
+      if (v.trim() === '') {
+        var removed = blocks.splice(editingIndex, 1)[0];
+        if (editingIndex > 0 && editingIndex <= blocks.length) {
+          var prev = blocks[editingIndex - 1];
+          if (editingIndex === blocks.length) prev.sep = '';
+          else if (prev.sep !== '\n\n' && removed.sep === '\n\n') prev.sep = '\n\n';
+        }
+      } else {
+        blocks[editingIndex].text = v.replace(/\s+$/, '');
+      }
+    }
+    editingIndex = -1;
+    render();
+    notify();
+  }
+
+  function notify() {
+    try { window.Android.onChanged(getMarkdown()); } catch (e) {}
+  }
+
+  function render() {
+    var scrollY = window.scrollY;
+    var html = '';
+    for (var i = 0; i < blocks.length; i++) {
+      if (i === editingIndex) {
+        html += '<div class="block editing" data-i="' + i + '"><textarea data-i="' + i + '"></textarea></div>';
+      } else {
+        html += '<div class="block" data-i="' + i + '">' + renderBlockHtml(blocks[i].text) + '</div>';
+      }
+    }
+    container.innerHTML = html;
+    var ta = container.querySelector('textarea');
+    if (ta) {
+      ta.value = blocks[editingIndex].text;
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+      autoGrow(ta);
+      ta.addEventListener('input', function () { autoGrow(ta); });
+      ta.addEventListener('blur', function () { commitEdit(true); });
+      ta.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Escape' || (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey))) {
+          ev.preventDefault(); commitEdit(true);
+        }
+      });
+    }
+    window.scrollTo(0, scrollY);
+  }
+
+  function autoGrow(ta) {
+    ta.style.height = 'auto';
+    ta.style.height = Math.max(ta.scrollHeight, 40) + 'px';
+  }
+
+  container.addEventListener('click', function (ev) {
+    var el = ev.target;
+    while (el && el !== container && !el.classList.contains('block')) el = el.parentElement;
+    if (!el || el === container || el.classList.contains('editing')) return;
+    var i = parseInt(el.getAttribute('data-i'), 10);
+    if (isNaN(i)) return;
+    editingIndex = i;
+    render();
+  });
+
+  // 容器空白处点击 = 结束编辑
+  document.addEventListener('touchstart', function (ev) {
+    if (editingIndex >= 0 && !container.contains(ev.target)) commitEdit(true);
+  }, { passive: true });
+
+  window.Editor = {
+    setMarkdown: function (md) {
+      blocks = splitBlocks(md || '');
+      editingIndex = -1;
+      render();
+      return true;
+    },
+    getMarkdown: function () { return getMarkdown(); },
+    appendBlock: function (md) {
+      if (blocks.length) blocks[blocks.length - 1].sep = '\n\n';
+      blocks.push({ text: md, sep: '' });
+      render(); notify(); return true;
+    },
+    isEditing: function () { return editingIndex >= 0; }
+  };
+
+  // 原生侧加载完成信号
+  try { window.Android.onReady(); } catch (e) {}
+})();
+</script>
+</body>
+</html>

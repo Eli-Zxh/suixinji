@@ -1,0 +1,39 @@
+version: 2
+
+updates:
+  - package-ecosystem: gradle
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 4
+    labels:
+      - dependencies
+      - needs-device-verify
+    groups:
+      androidx:
+        patterns:
+          - "androidx.*"
+      kotlin:
+        patterns:
+          - "org.jetbrains.kotlin*"
+          - "org.jetbrains.kotlinx*"
+    # 端侧推理相关依赖升级必须真机验证精度与内存，不交给机器人自动合
+    ignore:
+      - dependency-name: "com.google.ai.edge.litertlm:litertlm-android"
+        versions: ["*"]
+      - dependency-name: "androidx.compose:compose-bom"
+        versions: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies

@@ -1,0 +1,69 @@
+name: 功能建议 / Feature request
+description: 新能力、体验改进、支持更多模型或格式
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本项目的全部处理都在手机本地完成。提建议时请一并考虑端侧约束：
+        模型体积、内存峰值、耗时、以及是否需要用户手动导入模型。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解决的实际问题
+      description: 描述使用场景与痛点，而不是直接描述实现方式
+      placeholder: |
+        课堂录音经常有老师临时插播与课程无关的内容，归纳出的笔记里混入了无关段落，
+        只能事后手动删。
+    validations:
+      required: true
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: 涉及模块
+      options:
+        - 音频转写（ASR）
+        - AI 归纳（LLM）
+        - 笔记编辑器 / Markdown
+        - SRT 字幕
+        - 长任务 / 批量队列
+        - 模型导入 / 模型管理
+        - WebDAV 同步
+        - 本地对话
+        - 首页 / 工作区组织
+        - 日志与诊断
+        - 构建与发布
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议的做法
+      description: 可行的方案、交互位置、涉及哪些设置项
+    validations:
+      required: true
+
+  - type: textarea
+    id: edge-cost
+    attributes:
+      label: 端侧代价评估
+      description: 是否引入新模型/新依赖？预计增加多少存储、内存、耗时？没有把握就写"未知"
+      placeholder: |
+        未知。若需要额外 VAD 分段模型约增加几十 MB，推理耗时待测。
+    validations:
+      required: false
+
+  - type: dropdown
+    id: help
+    attributes:
+      label: 你是否愿意参与
+      options:
+        - 我来提 PR
+        - 我可以帮忙在真机上验证
+        - 只能提建议
+    validations:
+      required: true

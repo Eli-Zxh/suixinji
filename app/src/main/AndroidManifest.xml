@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+  xmlns:tools="http://schemas.android.com/tools">
+
+  <!-- 录音（前台服务录音） -->
+  <uses-permission android:name="android.permission.RECORD_AUDIO" />
+  <!-- 前台服务与通知（录音后台保活；长任务进度条） -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <!-- WebDAV 同步 -->
+  <uses-permission android:name="android.permission.INTERNET" />
+  <!-- 照片自动插图：按拍摄时间扫描 DCIM/Pictures（需用户在系统设置授予「所有文件访问」） -->
+  <uses-permission
+    android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+    tools:ignore="ScopedStorage" />
+
+  <application
+    android:name=".App"
+    android:label="@string/app_name"
+    android:icon="@mipmap/ic_launcher"
+    android:roundIcon="@mipmap/ic_launcher"
+    android:theme="@style/Theme.SuixinJi"
+    android:allowBackup="true"
+    android:supportsRtl="true">
+
+    <activity
+      android:name=".MainActivity"
+      android:exported="true"
+      android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+    </activity>
+
+    <!-- 录音前台服务：进程被杀前尽力落盘；崩溃残留由下次启动恢复 -->
+    <service
+      android:name=".audio.RecordService"
+      android:exported="false"
+      android:foregroundServiceType="microphone" />
+
+    <!-- 长任务（批量转写/归纳）前台服务：通知栏进度条 + 后台保活，可离开应用页面等待 -->
+    <service
+      android:name=".task.TaskService"
+      android:exported="false"
+      android:foregroundServiceType="dataSync" />
+  </application>
+
+</manifest>

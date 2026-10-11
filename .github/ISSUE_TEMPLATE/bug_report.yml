@@ -1,0 +1,113 @@
+name: 问题反馈 / Bug report
+description: 录音、转写、AI 归纳、编辑器等环节异常
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        端侧应用的问题高度依赖**设备型号 + 内存 + 系统 ROM**，请尽量填全。
+        崩溃类问题请务必附上「设置 → 日志导出（诊断）」生成的 zip。
+
+  - type: input
+    id: app-version
+    attributes:
+      label: 应用版本
+      description: 设置页底部或「关于」里显示的版本号，并注明是 debug 还是 release 包
+      placeholder: v1.0 (release)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: 出问题的环节
+      options:
+        - 首页 / 卡片列表
+        - 音频转写（ASR）
+        - AI 归纳（LLM）
+        - 笔记编辑器 / Markdown 渲染
+        - SRT 字幕
+        - 长任务 / 批量队列
+        - 模型导入
+        - WebDAV 同步
+        - 本地对话
+        - 闪退 / 无法启动
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: symptom
+    attributes:
+      label: 现象与期望
+      description: 一句话说清"实际发生什么"和"你期望什么"
+      placeholder: |
+        实际：32 分钟的音频转写到 68% 时应用被系统杀掉，重进后进度丢失。
+        期望：被杀后能从断点接续，或至少保留已转写部分。
+    validations:
+      required: true
+
+  - type: textarea
+    id: device
+    attributes:
+      label: 设备与系统
+      description: 型号 / 安卓版本 / ROM（MagicOS、HyperOS 等）/ 运行内存 / 剩余存储
+      placeholder: |
+        骁龙 8 Elite 机型，MagicOS 9.0（Android 15），12GB 内存，转写时剩余存储约 40GB
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 从哪个入口开始、点了什么、等了多久。能否稳定复现请写明
+      placeholder: |
+        1. 首页 → 转写音频文件，选 3 个 mp3（共 42 分钟）
+        2. 开始转写，切到后台约 2 分钟
+        3. 回前台发现进程已被杀
+        复现频率：每次
+    validations:
+      required: true
+
+  - type: textarea
+    id: models
+    attributes:
+      label: 使用的模型
+      description: ASR 用哪个包、LLM 是哪个 .litertlm、导入后是否改过文件名
+      placeholder: |
+        SenseVoice-Small int8（三文件原样导入）+ Gemma-4 E2B int4（约 2.4GB）
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志与现场
+      description: |
+        「设置 → 日志导出（诊断）」zip 的内容，或 adb logcat 关键片段。
+        崩溃类问题还可提供 files/logs/ 下的 crash.log、native_crash.log、running.json。
+        内容很长时请只贴关键行，zip 通过下方"附件"上传。
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 补充信息
+      description: 是否首次安装、是否刚升级过、后台是否限制应用、省电模式是否开启
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: 隐私自查（提交前必读）
+      description: 上传任何日志、截图、录屏或笔记片段之前请逐条确认
+      options:
+        - label: 我确认附件里不含我的笔记正文、文件名、账号信息（WebDAV 地址与用户名）等个人内容
+          required: true
+        - label: 我确认日志 zip 里的设备信息（机型、序列号相关标识）愿意公开
+          required: true
