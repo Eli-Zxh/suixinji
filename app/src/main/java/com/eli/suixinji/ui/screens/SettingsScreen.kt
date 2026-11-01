@@ -17,6 +17,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -44,7 +45,11 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.eli.suixinji.BuildConfig
 import com.eli.suixinji.data.SettingsStore
+import com.eli.suixinji.llm.CloudLlmConfig
+import com.eli.suixinji.llm.CloudLlmEngine
+import com.eli.suixinji.llm.LocalModels
 import com.eli.suixinji.llm.NoteLlmEngine
 import com.eli.suixinji.ui.components.KeyValueRow
 import com.eli.suixinji.ui.components.MonospaceBlock
@@ -71,7 +76,9 @@ fun SettingsScreen(
 ) {
   val context = LocalContext.current
   val scope = rememberCoroutineScope()
+  var showCloudConsent by remember { mutableStateOf(false) }
   val workplace by store.workplaceTreeUri.collectAsState(initial = null)
+  val localModelId by store.localModelId.collectAsState(initial = LocalModels.DEFAULT_ID)
 
   val picker = rememberLauncherForActivityResult(
     ActivityResultContracts.OpenDocumentTree()
@@ -111,18 +118,17 @@ fun SettingsScreen(
   }
 
   fun refreshLlmStatus() {
-    val f = File(context.filesDir, NoteLlmEngine.MODEL_PATH)
+    val profile = LocalModels.byId(localModelId)
+    val f = File(context.filesDir, profile.fileName)
     llmStatus = if (f.isFile && f.length() > 1_000_000L) {
-      true to "已就绪（${"%.2f".format(f.length() / 1e9)}GB）"
+      true to "文件已导入（${"%.2f".format(f.length() / 1e9)}GB）"
     } else {
-      false to "未导入（${NoteLlmEngine.MODEL_NAME}）"
+      false to "未导入（${profile.label}）"
     }
   }
 
-  LaunchedEffect(Unit) {
-    refreshModelStatus()
-    refreshLlmStatus()
-  }
+  LaunchedEffect(Unit) { refreshModelStatus() }
+  LaunchedEffect(localModelId) { refreshLlmStatus() }
 
   val modelPicker = rememberLauncherForActivityResult(
     ActivityResultContracts.OpenDocumentTree(),
@@ -159,9 +165,10 @@ fun SettingsScreen(
     }
     scope.launch {
       llmImportProgress = 0f
+      val target = LocalModels.byId(localModelId)
       val err = ModelImporter.importFromFile(
         context, fileUri,
-        File(context.filesDir, NoteLlmEngine.MODEL_PATH),
+        File(context.filesDir, target.fileName),
       ) { p -> llmImportProgress = p }
       llmImportProgress = null
       refreshLlmStatus()
@@ -374,8 +381,29 @@ fun SettingsScreen(
 
     SectionCard(
       title = "归纳模型（可选）",
-      subtitle = "Gemma-4 E2B（.litertlm，约 2.4GB），用于 AI 归纳笔记",
+      subtitle = "本地 .litertlm；按设备内存选择，用于 AI 归纳笔记",
     ) {
+      LocalModels.all.forEach { p ->
+        Row(
+          modifier = Modifier
+            .fillMaxWidth()
+            .clickable { scope.launch { store.setLocalModelId(p.id) } },
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          RadioButton(
+            selected = localModelId == p.id,
+            onClick = { scope.launch { store.setLocalModelId(p.id) } },
+          )
+          Column(Modifier.weight(1f)) {
+            Text(p.label, style = MaterialTheme.typography.bodyMedium)
+            Text(
+              "约 ${p.approxMb}MB · ${p.hint}",
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+          }
+        }
+      }
       llmStatus?.let { (ready, msg) ->
         Row(verticalAlignment = Alignment.CenterVertically) {
           StatusPill(if (ready) "已就绪" else "未导入", if (ready) Tone.Good else Tone.Warn)
@@ -395,10 +423,11 @@ fun SettingsScreen(
           onClick = { llmPicker.launch(arrayOf("*/*")) },
         ) { Text(if (llmStatus?.first == true) "重新导入" else "导入模型") }
       }
+      val target = LocalModels.byId(localModelId)
       MonospaceBlock(
         text = "导入方法二选一：\n" +
-          "1) 点「导入模型」，在文件选择器里直接选中 gemma-4-E2B-it.litertlm 文件；\n" +
-          "2) adb push gemma-4-E2B-it.litertlm /sdcard/Download/ 后按 1) 操作。\n\n" +
+          "1) 点「导入模型」，在文件选择器里选中 ${target.label} 的 .litertlm 文件；\n" +
+          "2) adb push <model>.litertlm /sdcard/Download/ 后按 1) 操作。\n\n" +
           "注意：首次归纳加载模型需数秒到数十秒；不用时不占内存。",
       )
     }
@@ -436,6 +465,148 @@ fun SettingsScreen(
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
       )
+    }
+
+    val provider by store.llmProvider.collectAsState(initial = "local")
+    var cloudUrl by remember { mutableStateOf("") }
+    var cloudModel by remember { mutableStateOf("") }
+    var cloudKey by remember { mutableStateOf("") }
+    var showCloudKey by remember { mutableStateOf(false) }
+    var cloudMsg by remember { mutableStateOf<String?>(null) }
+    var cloudBusy by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+      cloudUrl = store.cloudBaseUrl.firstOrNull() ?: ""
+      cloudModel = store.cloudModelName.firstOrNull() ?: ""
+      cloudKey = store.cloudApiKey.firstOrNull() ?: ""
+    }
+    SectionCard(
+      title = "归纳方式 / 云端模型",
+      subtitle = "全局选择：本地模型，或 OpenAI 兼容的云端模型；只影响 AI 归纳",
+    ) {
+      Row(
+        modifier = Modifier
+          .fillMaxWidth()
+          .clickable { scope.launch { store.setLlmProvider("local") } },
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        RadioButton(
+          selected = provider != "cloud",
+          onClick = { scope.launch { store.setLlmProvider("local") } },
+        )
+        Text("本地模型（离线，推荐）", style = MaterialTheme.typography.bodyMedium)
+      }
+      Row(
+        modifier = Modifier
+          .fillMaxWidth()
+          .clickable { if (provider != "cloud") showCloudConsent = true },
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        RadioButton(
+          selected = provider == "cloud",
+          onClick = { if (provider != "cloud") showCloudConsent = true },
+        )
+        Text("云端模型（OpenAI 兼容）", style = MaterialTheme.typography.bodyMedium)
+      }
+      if (provider == "cloud") {
+        Text(
+          "启用后，字幕/提示词内容会发送到你填写的 API；请自行确认服务商隐私条款。",
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.error,
+        )
+        OutlinedTextField(
+          value = cloudUrl,
+          onValueChange = { cloudUrl = it },
+          label = { Text("接口地址") },
+          placeholder = { Text("https://api.example.com/v1") },
+          modifier = Modifier.fillMaxWidth(),
+          singleLine = true,
+        )
+        OutlinedTextField(
+          value = cloudModel,
+          onValueChange = { cloudModel = it },
+          label = { Text("模型名") },
+          modifier = Modifier.fillMaxWidth(),
+          singleLine = true,
+        )
+        OutlinedTextField(
+          value = cloudKey,
+          onValueChange = { cloudKey = it },
+          label = { Text("API Key（可留空，仅免鉴权服务）") },
+          modifier = Modifier.fillMaxWidth(),
+          singleLine = true,
+          visualTransformation =
+            if (showCloudKey) VisualTransformation.None else PasswordVisualTransformation(),
+          trailingIcon = {
+            IconButton(onClick = { showCloudKey = !showCloudKey }) {
+              Icon(
+                if (showCloudKey) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                contentDescription = null,
+              )
+            }
+          },
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+          Button(
+            enabled = !cloudBusy,
+            onClick = {
+              scope.launch {
+                cloudBusy = true
+                cloudMsg = null
+                runCatching {
+                  store.setCloudLlmConfig(cloudUrl.trim(), cloudModel.trim(), cloudKey.trim())
+                }.onSuccess {
+                  cloudMsg = "已保存：密钥已用 Android Keystore 加密"
+                }.onFailure {
+                  cloudMsg = "保存失败：${it.message}"
+                }
+                cloudBusy = false
+              }
+            },
+          ) { Text("保存") }
+          OutlinedButton(
+            enabled = !cloudBusy && cloudUrl.isNotBlank() && cloudModel.isNotBlank(),
+            onClick = {
+              scope.launch {
+                cloudBusy = true
+                cloudMsg = withContext(Dispatchers.IO) {
+                  CloudLlmEngine.probe(
+                    CloudLlmConfig(cloudUrl.trim(), cloudModel.trim(), cloudKey.trim()),
+                  )
+                }
+                cloudBusy = false
+              }
+            },
+          ) { Text(if (cloudBusy) "测试中…" else "测试连接") }
+          TextButton(
+            onClick = {
+              scope.launch {
+                store.clearCloudLlmConfig()
+                cloudKey = ""
+                cloudMsg = "已清除云端模型配置"
+              }
+            },
+          ) { Text("清除") }
+        }
+        if (BuildConfig.DEBUG) {
+          TextButton(
+            onClick = {
+              cloudUrl = "https://text.pollinations.ai/openai"
+              cloudModel = "openai"
+              cloudKey = ""
+              cloudMsg = "已填入第三方免费测试端点；仅 debug 包可见，请勿发送隐私内容"
+            },
+          ) { Text("填入免费测试端点（debug）") }
+        }
+        cloudMsg?.let {
+          Text(it, style = MaterialTheme.typography.bodySmall)
+        }
+        Text(
+          "密钥只存 DataStore 密文（Android Keystore AES-GCM），不上传、不入日志；" +
+            "换机/恢复备份后需要重新填写。",
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
     }
 
     SectionCard(
@@ -661,5 +832,29 @@ fun SettingsScreen(
         color = MaterialTheme.colorScheme.onSurfaceVariant,
       )
     }
+  }
+
+  if (showCloudConsent) {
+    AlertDialog(
+      onDismissRequest = { showCloudConsent = false },
+      title = { Text("启用云端模型？") },
+      text = {
+        Text(
+          "开启后，AI 归纳会把字幕/提示词发送到你在下方配置的第三方接口。" +
+            "请确认该服务可信；密钥会加密保存在本机。",
+        )
+      },
+      confirmButton = {
+        TextButton(
+          onClick = {
+            scope.launch { store.setLlmProvider("cloud") }
+            showCloudConsent = false
+          },
+        ) { Text("确认启用") }
+      },
+      dismissButton = {
+        TextButton(onClick = { showCloudConsent = false }) { Text("取消") }
+      },
+    )
   }
 }

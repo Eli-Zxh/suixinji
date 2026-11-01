@@ -23,6 +23,7 @@
     android:roundIcon="@mipmap/ic_launcher"
     android:theme="@style/Theme.SuixinJi"
     android:allowBackup="true"
+    android:largeHeap="true"
     android:supportsRtl="true">
 
     <activity

@@ -3,8 +3,6 @@ package com.eli.suixinji.llm
 import com.eli.suixinji.asr.TranscriptSegment
 import com.eli.suixinji.note.NoteComposer
 import com.eli.suixinji.util.AppLog
-import com.google.ai.edge.litertlm.Content
-import com.google.ai.edge.litertlm.Message
 
 /**
  * 三段式笔记归纳 agent（用户指定架构；M2.6 按「减少 decode 输出」精简；
@@ -206,14 +204,14 @@ object NoteSummarizer {
    * 长任务中途崩溃（原生崩溃无法被 UncaughtExceptionHandler 捕获）时已完成部分不丢。
    */
   suspend fun run(
-    engine: NoteLlmEngine,
+    llm: SummarizerLlm,
     segments: List<TranscriptSegment>,
     sourceName: String,
     language: String = "zh",
     onProgress: (Stage, Int, Int) -> Unit = { _, _, _ -> },
     onCheckpoint: suspend (String) -> Unit = {},
   ): String {
-    engine.initialize()
+    llm.initialize()
     val P = pack(language)
     val fullText = segments.joinToString("\n") { it.text }
     require(fullText.isNotBlank()) { "转写内容为空" }
@@ -228,7 +226,7 @@ object NoteSummarizer {
     var abstractText = ""
     if (slices.size == 1) {
       onProgress(Stage.OVERVIEW, 1, 1)
-      val reply = callLlm(engine, P.system, P.overviewSingle(fullText, sourceName), "概览") {
+      val reply = callLlm(llm, P.system, P.overviewSingle(fullText, sourceName), "概览") {
         !hasEcho(it, fullText)
       }
       title = extractAfter(reply, P.titleKey).ifBlank { sourceName.substringBeforeLast('.') }
@@ -240,14 +238,14 @@ object NoteSummarizer {
         val text = slice.joinToString("\n") { it.text }
         val span = spanOf(slice)
         val reply = callLlm(
-          engine, P.system,
+          llm, P.system,
           P.overviewSlice(text, sourceName, i + 1, slices.size, span),
           "概览 ${i + 1}/${slices.size}",
         ) { !hasEcho(it, text) }
         briefs.add(P.brief(i + 1, span) + "\n$reply")
       }
       onProgress(Stage.OVERVIEW, slices.size, slices.size)
-      val merged = callLlm(engine, P.system, P.overviewMerge(briefs.joinToString("\n\n"), sourceName), "概览合并") { true }
+      val merged = callLlm(llm, P.system, P.overviewMerge(briefs.joinToString("\n\n"), sourceName), "概览合并") { true }
       title = extractAfter(merged, P.titleKey).ifBlank { sourceName.substringBeforeLast('.') }
       abstractText = extractAfter(merged, P.abstractKey)
     }
@@ -259,7 +257,7 @@ object NoteSummarizer {
     val sectionBodies = arrayOfNulls<String>(slices.size)
     // 概览完成即可落第一版半成品（题目+摘要），崩溃也不至于全空
     runCatching {
-      onCheckpoint(assemble(P, title, abstractText, emptyList(), sliceSpans, sourceName, engine.backendLabel, segments))
+      onCheckpoint(assemble(P, title, abstractText, emptyList(), sliceSpans, sourceName, llm.label, segments))
     }
     var redoParts: Set<Int> = emptySet()
     var reviewFeedback: String? = null
@@ -279,7 +277,7 @@ object NoteSummarizer {
         }
         val tSec = System.currentTimeMillis()
         sectionBodies[i] = callLlm(
-          engine, P.system, prompt,
+          llm, P.system, prompt,
           "分段 ${i + 1}/${slices.size}" + if (retried) "（重做）" else "",
         ) { !hasEcho(it, text) }
         sectionMs += System.currentTimeMillis() - tSec
@@ -289,18 +287,18 @@ object NoteSummarizer {
             assemble(
               P, title, abstractText,
               sectionBodies.take(i + 1).map { it.orEmpty() },
-              sliceSpans, sourceName, engine.backendLabel, segments,
+              sliceSpans, sourceName, llm.label, segments,
             ),
           )
         }
       }
       val bodies = sectionBodies.map { it.orEmpty() }
 
-      val draft = assemble(P, title, abstractText, bodies, sliceSpans, sourceName, engine.backendLabel, segments)
+      val draft = assemble(P, title, abstractText, bodies, sliceSpans, sourceName, llm.label, segments)
       onProgress(Stage.REVIEW, 1, 1)
       val tReview = System.currentTimeMillis()
       val verdict = callLlm(
-        engine, P.system, P.review(draft, slices.size),
+        llm, P.system, P.review(draft, slices.size),
         "审核与自测" + if (retried) "（重做后）" else "",
       ) { isVerdict(it, P) }
       val passed = isPass(verdict, P)
@@ -311,21 +309,21 @@ object NoteSummarizer {
 
       if (passed) {
         // 自测题随本回复直接带出，省一次整稿调用
-        val questions = verdict.substringAfter(P.passMark, "").trim()
+        val questions = dedupeQuestions(verdict.substringAfter(P.passMark, "").trim())
         if (questions.isNotBlank()) {
-          return assemble(P, title, abstractText, bodies, sliceSpans, sourceName, engine.backendLabel, segments, questionsSection = questions)
+          return assemble(P, title, abstractText, bodies, sliceSpans, sourceName, llm.label, segments, questionsSection = questions)
         }
         AppLog.w("归纳：审核通过但未带出自测部分，单独补一次生成")
         onProgress(Stage.QUESTIONS, 1, 1)
-        val q = callLlm(engine, P.system, P.questions(draft), "自测题") { !hasEcho(it, draft) }
-        return assemble(P, title, abstractText, bodies, sliceSpans, sourceName, engine.backendLabel, segments, questionsSection = q.trim())
+        val q = dedupeQuestions(callLlm(llm, P.system, P.questions(draft), "自测题") { !hasEcho(it, draft) })
+        return assemble(P, title, abstractText, bodies, sliceSpans, sourceName, llm.label, segments, questionsSection = q)
       }
 
       if (retried) {
         AppLog.w("归纳：复审仍未通过，采纳当前草稿并单独生成自测题")
         onProgress(Stage.QUESTIONS, 1, 1)
-        val q = callLlm(engine, P.system, P.questions(draft), "自测题") { !hasEcho(it, draft) }
-        return assemble(P, title, abstractText, bodies, sliceSpans, sourceName, engine.backendLabel, segments, questionsSection = q.trim())
+        val q = dedupeQuestions(callLlm(llm, P.system, P.questions(draft), "自测题") { !hasEcho(it, draft) })
+        return assemble(P, title, abstractText, bodies, sliceSpans, sourceName, llm.label, segments, questionsSection = q)
       }
 
       redoParts = parseRedoParts(verdict, P)
@@ -353,7 +351,7 @@ object NoteSummarizer {
   // ---------- LLM 调用（独立会话 + 校验重试） ----------
 
   private fun callLlm(
-    engine: NoteLlmEngine,
+    llm: SummarizerLlm,
     systemInstruction: String,
     prompt: String,
     label: String,
@@ -363,24 +361,47 @@ object NoteSummarizer {
     while (true) {
       attempt++
       val t0 = System.currentTimeMillis()
-      engine.conversation(systemInstruction).use { conv ->
-        val reply = msgText(conv.sendMessage(prompt))
-        AppLog.i(
-          "归纳：$label 第${attempt}次调用 耗时=${System.currentTimeMillis() - t0}ms replyChars=${reply.length}",
-        )
-        if (reply.isBlank()) {
-          if (attempt >= 2) throw IllegalStateException("$label：LLM 返回空内容")
-          AppLog.w("归纳：$label 返回为空，重试")
-          return@use
-        }
-        if (!validator(reply)) {
-          if (attempt >= 2) throw IllegalStateException("$label：输出校验未通过（疑似回显或异常输出）")
-          AppLog.w("归纳：$label 输出校验未通过（疑似回显），重试")
-          return@use
-        }
-        return reply
+      // 输出预算按输入长度浮动，而不是按阶段写死；避免长内容被固定上限截断。
+      val maxOut = (prompt.length / 2 + 512).coerceIn(512, 8192)
+      val reply = llm.chat(systemInstruction, prompt, maxOut)
+      AppLog.i(
+        "归纳：$label 第${attempt}次调用 耗时=${System.currentTimeMillis() - t0}ms replyChars=${reply.length}",
+      )
+      if (reply.isBlank()) {
+        if (attempt >= 2) throw IllegalStateException("$label：LLM 返回空内容")
+        AppLog.w("归纳：$label 返回为空，重试")
+        continue
       }
+      if (!validator(reply)) {
+        if (attempt >= 2) throw IllegalStateException("$label：输出校验未通过（疑似回显或异常输出）")
+        AppLog.w("归纳：$label 输出校验未通过（疑似回显），重试")
+        continue
+      }
+      return reply
     }
+  }
+
+  /**
+   * 轻量模型容易把同一组问题重复多遍，且最后一条常被 token 上限截断。
+   * 按行去重，只保留完整问题；非列表行（标题等）原样保留。
+   */
+  private fun dedupeQuestions(text: String): String {
+    val seen = HashSet<String>()
+    val out = ArrayList<String>()
+    for (line in text.lineSequence()) {
+      val key = line.trim()
+      if (key.isBlank()) {
+        out.add(line)
+        continue
+      }
+      val isItem = key.startsWith("- [ ]") || key.startsWith("- [x]")
+      if (isItem) {
+        if (!key.endsWith("？") && !key.endsWith("?")) continue
+        if (!seen.add(key)) continue
+      }
+      out.add(line)
+    }
+    return out.joinToString("\n").trim()
   }
 
   /** 取样检测回显：原文中均匀取若干 60 字窗口，任一出现在输出即判定回显。 */
@@ -484,6 +505,4 @@ object NoteSummarizer {
     return sb.toString()
   }
 
-  private fun msgText(m: Message): String =
-    m.contents.contents.firstNotNullOfOrNull { it as? Content.Text }?.text ?: ""
 }

@@ -52,7 +52,8 @@ object AppLog {
       i(
         "==== 会话开始 app=$ver pid=${Process.myPid()} " +
           "android=${Build.VERSION.RELEASE}(SDK ${Build.VERSION.SDK_INT}) " +
-          "device=${Build.BRAND} ${Build.MODEL} abis=${Build.SUPPORTED_ABIS.take(1).joinToString()} " +
+          "device=${Build.BRAND} ${Build.MODEL} soc=${Build.SOC_MANUFACTURER}/${Build.HARDWARE} " +
+          "board=${Build.BOARD} abis=${Build.SUPPORTED_ABIS.take(1).joinToString()} " +
           "rom=${Build.DISPLAY.take(40)} cores=${Runtime.getRuntime().availableProcessors()} ====",
       )
     } catch (_: Throwable) {

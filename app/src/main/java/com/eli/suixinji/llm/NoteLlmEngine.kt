@@ -3,11 +3,13 @@ package com.eli.suixinji.llm
 import android.content.Context
 import com.eli.suixinji.util.AppLog
 import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.Message
 import java.io.File
 
 /**
@@ -21,14 +23,33 @@ import java.io.File
  * - CPU 是可靠基线（真机全文归纳 785~903s，单次调用 100~340s）。
  * 与 ASR 引擎不同时驻留：每次归纳前 [initialize]，结束调用 [close] 释放内存。
  */
-class NoteLlmEngine(private val context: Context) {
+class NoteLlmEngine(
+  private val context: Context,
+  private val profile: LocalModelProfile = LocalModels.byId(LocalModels.DEFAULT_ID),
+) : SummarizerLlm {
 
   @Volatile private var engine: Engine? = null
 
-  @Volatile var backendLabel: String = "未加载"
-    private set
+  @Volatile private var backendLabelRaw: String = "未加载"
 
-  fun modelFile(): File = File(context.filesDir, MODEL_PATH)
+  override val label: String get() = profile.label
+
+  override val backendLabel: String get() = backendLabelRaw
+
+  /** 接口默认初始化：由 LlmController 在加载前用显式后端策略调用参数版。 */
+  override fun initialize() {
+    initialize("auto")
+  }
+
+  override fun chat(systemInstruction: String, prompt: String, maxOutputTokens: Int): String =
+    conversation(systemInstruction, maxOutputTokens).use { conv ->
+      val m = conv.sendMessage(prompt)
+      m.contents.contents.firstNotNullOfOrNull { it as? Content.Text }?.text ?: ""
+    }
+
+  fun modelFile(): File = File(context.filesDir, profile.fileName)
+
+  fun profile(): LocalModelProfile = profile
 
   fun modelReady(): Boolean {
     val f = modelFile()
@@ -64,15 +85,16 @@ class NoteLlmEngine(private val context: Context) {
     }
     AppLog.i(
       "LLM：开始加载模型 size=${f.length()}B 策略=$backendPolicy " +
-        "链=${chain.joinToString("→") { it.first }} maxTokens=$MAX_NUM_TOKENS",
+        "设备=${DeviceCompat.describe()} 链=${chain.joinToString("→") { it.first }} maxTokens=${profile.maxNumTokens}",
     )
+    AppLog.mem("LLM加载前")
     // OpenCL 预载只服务 GPU 探活；纯 CPU 策略跳过，省去无效尝试
     if (chain.any { it.first == "GPU" }) preloadOpenCl()
     val cacheDir = File(context.cacheDir, "llm").apply { mkdirs() }
     val base = EngineConfig(
       modelPath = f.absolutePath,
       backend = Backend.GPU(),
-      maxNumTokens = MAX_NUM_TOKENS,
+      maxNumTokens = profile.maxNumTokens,
       cacheDir = cacheDir.absolutePath,
     )
 
@@ -84,15 +106,28 @@ class NoteLlmEngine(private val context: Context) {
     // 单次调用预估回落到 10 分钟超时线内。真机实测 NPU 仍显著慢于 CPU 时，
     // 用户可在设置里强制 CPU；链序回退改一行即可）。
     var lastError: Throwable? = null
-    for ((label, backend) in chain) {
+    for ((index, item) in chain.withIndex()) {
+      val (label, backend) = item
+      AppLog.mem("LLM尝试${label}前")
+      val t0 = System.currentTimeMillis()
       try {
         engine = initAndProbe(base.copy(backend = backend), label)
-        backendLabel = label
+        backendLabelRaw = label
         AppLog.i("LLM：$label 后端加载成功（含首推理探活） 耗时=${System.currentTimeMillis() - started}ms")
+        AppLog.mem("LLM就绪$label")
         return
       } catch (t: Throwable) {
         lastError = t
-        AppLog.w("LLM：$label 后端不可用（加载或首推理失败），尝试下一后端", t)
+        val kind = if (t is OutOfMemoryError) "OOM" else t.javaClass.simpleName
+        AppLog.w(
+          "LLM：$label 后端不可用（$kind，${System.currentTimeMillis() - t0}ms），" +
+            if (index + 1 < chain.size) "尝试下一后端" else "无后续后端",
+          t,
+        )
+        AppLog.mem("LLM失败$label")
+        // 让 native 释放上一后端的 mmap，再试下一后端；否则 2.5GB 模型可能叠两份。
+        System.gc()
+        if (index + 1 < chain.size) Thread.sleep(500)
       }
     }
     val reason = lastError?.message ?: lastError?.javaClass?.simpleName ?: "未知原因"
@@ -142,26 +177,34 @@ class NoteLlmEngine(private val context: Context) {
     }
   }
 
-  fun conversation(systemInstruction: String): Conversation {
+  fun conversation(
+    systemInstruction: String,
+    maxOutputTokens: Int = MAX_OUTPUT_TOKENS,
+  ): Conversation {
     val e = engine ?: error("LLM 引擎未初始化")
     return e.createConversation(
-      ConversationConfig(systemInstruction = Contents.of(systemInstruction)),
+      ConversationConfig(
+        systemInstruction = Contents.of(systemInstruction),
+        maxOutputToken = maxOutputTokens,
+      ),
     )
   }
 
-  fun close() {
+  override fun close() {
     if (engine != null) AppLog.i("LLM：释放引擎")
     runCatching { engine?.close() }
     engine = null
-    backendLabel = "未加载"
+    backendLabelRaw = "未加载"
   }
 
   companion object {
+    /** 单次生成上限：防止小模型在自测/审核阶段无限续写（1.5B CPU 实测会卡住）。 */
+    private const val MAX_OUTPUT_TOKENS: Int = 2048
+
     const val MODEL_PATH = "models/gemma-4-E2B-it.litertlm"
     const val MODEL_NAME = "gemma-4-E2B-it.litertlm"
 
     /** 限制上下文长度以压缩 KV cache 内存（单次调用输入 ≤4.5K 字符）。 */
-    private const val MAX_NUM_TOKENS: Int = 8192
     private const val CPU_THREADS = 6
     private const val MIN_MODEL_BYTES = 100L * 1024 * 1024
   }

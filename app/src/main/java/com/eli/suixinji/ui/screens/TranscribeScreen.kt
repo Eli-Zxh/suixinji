@@ -296,7 +296,7 @@ fun TranscribeScreen(
         }
         is LlmPhase.Done -> {
           KeyValueRow("笔记", lp.mdName)
-          KeyValueRow("耗时", "%.1fs（%s 后端）".format(lp.elapsedMs / 1000.0, lp.backend))
+          KeyValueRow("耗时", "%.1fs（模型 %s）".format(lp.elapsedMs / 1000.0, lp.backend))
           Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = {
               scope.launch {
@@ -319,25 +319,30 @@ fun TranscribeScreen(
           OutlinedButton(onClick = { llm.reset() }) { Text("重置") }
         }
         LlmPhase.Idle -> {
+          val ready = llm.modelReady()
           val canRun = controller.phase is TranscribePhase.Done &&
-            llm.modelReady() && !controller.isBusy() && !llm.busy()
+            ready && !controller.isBusy() && !llm.busy()
           Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
               enabled = canRun,
+              modifier = Modifier.weight(1f),
               onClick = {
                 val stem = controller.lastSourceName.substringBeforeLast('.')
                 if (stem.isNotBlank()) llm.summarizeFromSrt(stem)
               },
-            ) { Text(if (llm.modelReady()) "归纳刚转写的字幕" else "未导入归纳模型") }
+            ) { Text("归纳", maxLines = 1) }
             OutlinedButton(
-              enabled = llm.modelReady() && !llm.busy() && !controller.isBusy(),
+              enabled = ready && !llm.busy() && !controller.isBusy(),
+              modifier = Modifier.weight(1f),
               onClick = { showLlmBatchPicker = true },
-            ) { Text("批量归纳字幕库") }
+            ) { Text("批量", maxLines = 1) }
           }
           Text(
             when {
-              llm.modelReady() -> "  批量入口可勾选 audio/ 里任意字幕排队归纳；笔记写入根目录，逐篇完成即保存"
-              else -> "  到「设置 → 归纳模型」导入后可用"
+              !ready -> "  先到「设置」导入本地模型或配置云端模型"
+              controller.phase is TranscribePhase.Done ->
+                "  归纳当前字幕，或批量选择 audio/ 里的字幕排队"
+              else -> "  先在「转写音频文件」里完成一次转写，或直接点「批量」"
             },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

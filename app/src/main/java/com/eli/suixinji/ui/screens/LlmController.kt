@@ -6,13 +6,18 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.eli.suixinji.asr.TranscriptSegment
 import com.eli.suixinji.data.SettingsStore
+import com.eli.suixinji.llm.CloudLlmConfig
+import com.eli.suixinji.llm.CloudLlmEngine
+import com.eli.suixinji.llm.LocalModels
 import com.eli.suixinji.llm.NoteLlmEngine
+import com.eli.suixinji.llm.SummarizerLlm
 import com.eli.suixinji.llm.NoteSummarizer
 import com.eli.suixinji.srt.SrtParser
 import com.eli.suixinji.task.TaskNotify
 import com.eli.suixinji.util.AppLog
 import com.eli.suixinji.util.TaskTrace
 import com.eli.suixinji.workspace.WorkspaceStore
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -73,7 +78,39 @@ class LlmController(
   private val enqueueMutex = Mutex()
   @Volatile private var currentStem: String? = null
 
-  fun modelReady(): Boolean = NoteLlmEngine(context).modelReady()
+  /** 归纳方式：local（默认）/ cloud（全局使用网络 API）。 */
+  var provider by mutableStateOf("local")
+    private set
+
+  private var cloudConfig by mutableStateOf(CloudLlmConfig(null, null, null))
+
+  var localModelId by mutableStateOf(LocalModels.DEFAULT_ID)
+    private set
+
+  init {
+    scope.launch {
+      settings.llmProvider.collect { provider = it }
+    }
+    scope.launch {
+      settings.localModelId.collect { localModelId = it }
+    }
+    scope.launch {
+      combine(
+        settings.cloudBaseUrl,
+        settings.cloudModelName,
+        settings.cloudApiKey,
+      ) { url, model, key -> CloudLlmConfig(url, model, key) }
+        .collect { cloudConfig = it }
+    }
+  }
+
+  fun modelReady(): Boolean =
+    if (provider == "cloud") cloudConfig.complete
+    else NoteLlmEngine(context, LocalModels.byId(localModelId)).modelReady()
+
+  fun localModelLabel(): String = LocalModels.label(localModelId)
+
+  fun providerLabel(): String = if (provider == "cloud") "云端模型" else "本地模型"
 
   fun busy(): Boolean =
     queueRunning || pendingCount > 0 || phase is LlmPhase.LoadingModel ||
@@ -106,7 +143,7 @@ class LlmController(
     queueRunning = true
     var okCount = 0
     // 整批复用一个引擎（加载慢 + 反复 mmap 2.5GB 是闪退根源），finally 统一释放
-    var eng: NoteLlmEngine? = null
+    var eng: SummarizerLlm? = null
     try {
       TaskNotify.begin(context, "AI 归纳")
       while (true) {
@@ -127,27 +164,42 @@ class LlmController(
           AppLog.w("批量归纳：$stem 读取失败，继续下一个")
           continue
         }
-        // 引擎惰性创建；模型缺失/加载失败 → 终止整批（后续篇目同样无法处理）
+        // 引擎惰性创建；模型/网络配置缺失或加载失败 → 终止整批
         if (eng == null) {
           phase = LlmPhase.LoadingModel
           eng = withContext(Dispatchers.IO) {
-            val e = NoteLlmEngine(context)
             try {
-              if (!e.modelReady()) {
-                AppLog.e("批量归纳中止：模型未导入 path=${e.modelFile().absolutePath}")
-                phase = LlmPhase.Failed("归纳模型未导入：请先在「设置 → 归纳模型」导入 .litertlm 文件")
-                runCatching { e.close() }
-                null
-              } else {
-                // M2.10：推理后端策略与笔记语言均从设置读取（每次归纳即时生效）
-                e.initialize(settings.llmBackend.firstOrNull() ?: "auto")
-                AppLog.mem("LLM引擎就绪 backend=${e.backendLabel}")
-                e
+              when (provider) {
+                "cloud" -> {
+                  val cfg = cloudConfig
+                  if (!cfg.complete) {
+                    phase = LlmPhase.Failed("云端模型未配置：请先在「设置 → 云端模型」填写接口地址与模型名")
+                    null
+                  } else {
+                    CloudLlmEngine(cfg).also {
+                      it.initialize()
+                      AppLog.i("归纳引擎：cloud model=${cfg.model}（密钥不入日志）")
+                    }
+                  }
+                }
+                else -> {
+                  val e = NoteLlmEngine(context, LocalModels.byId(localModelId))
+                  if (!e.modelReady()) {
+                    AppLog.e("批量归纳中止：模型未导入 path=${e.modelFile().absolutePath}")
+                    phase = LlmPhase.Failed("归纳模型未导入：请先在「设置 → 归纳模型」导入 .litertlm 文件")
+                    runCatching { e.close() }
+                    null
+                  } else {
+                    // M2.10：推理后端策略与笔记语言均从设置读取（每次归纳即时生效）
+                    e.initialize(settings.llmBackend.firstOrNull() ?: "auto")
+                    AppLog.mem("LLM引擎就绪 backend=${e.backendLabel}")
+                    e
+                  }
+                }
               }
             } catch (t: Throwable) {
-              AppLog.e("批量归纳中止：模型加载失败", t)
+              AppLog.e("批量归纳中止：引擎加载失败", t)
               phase = LlmPhase.Failed(t.message ?: t.javaClass.simpleName)
-              runCatching { e.close() }
               null
             }
           } ?: break
@@ -202,7 +254,7 @@ class LlmController(
 
   /** 用给定引擎执行一次完整归纳并写盘（插图是独立步骤，不在此处）；返回 md 名，失败返回 null。 */
   private suspend fun runPipeline(
-    eng: NoteLlmEngine,
+    eng: SummarizerLlm,
     segments: List<TranscriptSegment>,
     sourceName: String,
   ): String? {
@@ -242,8 +294,8 @@ class LlmController(
         ?: throw IllegalStateException("写入归纳笔记失败")
 
       val totalMs = System.currentTimeMillis() - started
-      AppLog.i("归纳完成 file=$mdName backend=${eng.backendLabel} 耗时=${totalMs}ms")
-      phase = LlmPhase.Done(mdName, totalMs, eng.backendLabel)
+      AppLog.i("归纳完成 file=$mdName model=${eng.label} backend=${eng.backendLabel} 耗时=${totalMs}ms")
+      phase = LlmPhase.Done(mdName, totalMs, eng.label)
       return mdName
     } catch (t: Throwable) {
       AppLog.e("归纳失败", t)

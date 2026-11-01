@@ -43,6 +43,9 @@ case "$MODEL_NAME" in
     ;;
 esac
 
+# 允许用 SXJ_CACHE_LENGTH 覆盖默认 cache_length（0.5B 小模型建议 8192，覆盖 4.5K 字符切片）
+CACHE_LENGTH="${SXJ_CACHE_LENGTH:-$CACHE_LENGTH}"
+
 echo "=== Step 1: 从 modelscope 下载 $HF_REPO ==="
 python3 -c "
 from modelscope import snapshot_download

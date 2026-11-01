@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.dp
 import com.eli.suixinji.asr.SenseVoiceEngine
 import com.eli.suixinji.audio.AudioDecoder
 import com.eli.suixinji.data.SettingsStore
+import com.eli.suixinji.llm.LocalModels
 import com.eli.suixinji.llm.NoteLlmEngine
 import com.eli.suixinji.util.AppLog
 import com.eli.suixinji.util.TaskTrace
@@ -72,6 +73,7 @@ fun ChatScreen(settings: SettingsStore) {
   // 后端策略与笔记语言随设置读取（对话系统提示词语言跟随笔记语言）
   val llmBackend by settings.llmBackend.collectAsState(initial = "auto")
   val noteLang by settings.noteLanguage.collectAsState(initial = "zh")
+  val localModelId by settings.localModelId.collectAsState(initial = LocalModels.DEFAULT_ID)
   val msgs = remember { mutableStateListOf<ChatMsg>() }
   var input by remember { mutableStateOf("") }
   var busy by remember { mutableStateOf(false) }           // LLM 正在生成
@@ -118,7 +120,7 @@ fun ChatScreen(settings: SettingsStore) {
       llmStatus = "正在加载模型…（首次数秒到数十秒；探活失败会自动降级，详见日志）"
       AppLog.i("对话：模型加载开始 backend=$llmBackend")
       val t0 = System.currentTimeMillis()
-      e = NoteLlmEngine(context)
+      e = NoteLlmEngine(context, LocalModels.byId(localModelId))
       // M2.10：后端策略跟随设置（auto/cpu/npu/gpu），探活失败强制模式直接报错
       e.initialize(llmBackend)
       engine = e

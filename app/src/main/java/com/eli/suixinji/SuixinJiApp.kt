@@ -75,6 +75,7 @@ fun SuixinJiApp() {
     // 启动时：迁移旧目录结构 → 崩溃恢复录音（转写页显示恢复横幅）
     var recoveredMessage by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
+      runCatching { settingsStore.migrateCloudApiKey() }
       runCatching { ws.migrateLayout() }
         .onFailure { android.util.Log.w("SuixinJi", "目录迁移异常", it) }
       val r = CrashRecovery.recover(ws.audioDir(), appContext.contentResolver)
